@@ -1,88 +1,106 @@
 import streamlit as st
 import tempfile
+import numpy as np
+import faiss
 
-# Updated LangChain imports (IMPORTANT)
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-from langchain_community.llms import HuggingFaceHub
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+from huggingface_hub import InferenceClient
 
 # Page config
-st.set_page_config(page_title="CET Ranking Chatbot", layout="wide")
+st.set_page_config(page_title="CET Chatbot", layout="wide")
 
-st.title("🤖 CET Ranking Chatbot")
-st.write("Upload your ranking PDF and ask for structured data extraction")
+st.title("🤖 CET Ranking Chatbot (No Errors Version)")
+
+# Load embedding model (cached)
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
+
+# Split text into chunks
+def split_text(text, chunk_size=500):
+    chunks = []
+    for i in range(0, len(text), chunk_size):
+        chunks.append(text[i:i+chunk_size])
+    return chunks
+
+# Extract text from PDF
+def extract_text_from_pdf(file):
+    reader = PdfReader(file)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text
 
 # Upload PDF
-uploaded_file = st.file_uploader("Upload Ranking PDF", type=["pdf"])
+uploaded_file = st.file_uploader("📄 Upload Ranking PDF", type=["pdf"])
 
 if uploaded_file:
 
-    # Save file temporarily
-    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        file_path = tmp_file.name
-
     st.success("✅ PDF uploaded successfully!")
 
-    # Process PDF only once
-    if "vectorstore" not in st.session_state:
-        with st.spinner("🔄 Processing PDF..."):
+    # Extract text
+    text = extract_text_from_pdf(uploaded_file)
 
-            loader = PyPDFLoader(file_path)
-            documents = loader.load()
+    # Split into chunks
+    chunks = split_text(text)
 
-            # Split text into chunks
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
-            )
-            chunks = splitter.split_documents(documents)
+    # Convert to embeddings
+    embeddings = model.encode(chunks)
 
-            # Create embeddings
-            embeddings = HuggingFaceEmbeddings()
+    # Create FAISS index
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(np.array(embeddings))
 
-            # Create vector DB
-            vectorstore = FAISS.from_documents(chunks, embeddings)
+    st.success("✅ PDF processed!")
 
-            st.session_state.vectorstore = vectorstore
-
-        st.success("✅ PDF processed successfully!")
-
-    # User query
-    query = st.text_input(
-        "💬 Ask your question",
-        placeholder="Example: Extract CODE, COLLEGE NAME, COURSE CODE, COURSE NAME, CET NO, LOCATION"
+    # HuggingFace client
+    client = InferenceClient(
+        model="mistralai/Mistral-7B-Instruct-v0.2",
+        token=st.secrets["HF_TOKEN"]
     )
 
+    # User query
+    query = st.text_input("💬 Ask your question")
+
     if query:
+        # Embed query
+        query_vec = model.encode([query])
+
+        # Search similar chunks
+        D, I = index.search(np.array(query_vec), k=5)
+
+        context = "\n".join([chunks[i] for i in I[0]])
+
+        # Prompt
+        prompt = f"""
+You are an expert data extractor.
+
+From the given context, extract:
+CODE, COLLEGE NAME, COURSE CODE, COURSE NAME, CET NO, LOCATION
+
+Return in clean structured format.
+
+Context:
+{context}
+
+Question:
+{query}
+"""
 
         with st.spinner("🤖 Generating answer..."):
-
-            # Load LLM (HuggingFace)
-            llm = HuggingFaceHub(
-                repo_id="google/flan-t5-base",  # fast & stable
-                model_kwargs={
-                    "temperature": 0,
-                    "max_length": 512
-                },
-                huggingfacehub_api_token=st.secrets["HF_TOKEN"]
+            response = client.text_generation(
+                prompt,
+                max_new_tokens=500,
+                temperature=0
             )
 
-            # Create QA chain
-            qa = RetrievalQA.from_chain_type(
-                llm=llm,
-                retriever=st.session_state.vectorstore.as_retriever()
-            )
+        st.subheader("📌 Answer")
+        st.write(response)
 
-            response = qa.run(query)
-
-            st.subheader("📌 Answer")
-            st.write(response)
-
-    # Optional: Clear session
-    if st.button("🔄 Reset"):
-        st.session_state.clear()
-        st.experimental_rerun()
+# Reset button
+if st.button("🔄 Reset"):
+    st.experimental_rerun()
