@@ -1,5 +1,4 @@
 import streamlit as st
-import tempfile
 import numpy as np
 import faiss
 
@@ -7,26 +6,18 @@ from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import InferenceClient
 
-# Page config
+# ---------------- PAGE SETUP ----------------
 st.set_page_config(page_title="CET Chatbot", layout="wide")
+st.title("🤖 CET Ranking Chatbot")
 
-st.title("🤖 CET Ranking Chatbot (No Errors Version)")
-
-# Load embedding model (cached)
+# ---------------- LOAD MODEL ----------------
 @st.cache_resource
 def load_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 model = load_model()
 
-# Split text into chunks
-def split_text(text, chunk_size=500):
-    chunks = []
-    for i in range(0, len(text), chunk_size):
-        chunks.append(text[i:i+chunk_size])
-    return chunks
-
-# Extract text from PDF
+# ---------------- FUNCTIONS ----------------
 def extract_text_from_pdf(file):
     reader = PdfReader(file)
     text = ""
@@ -34,7 +25,13 @@ def extract_text_from_pdf(file):
         text += page.extract_text() or ""
     return text
 
-# Upload PDF
+def split_text(text, chunk_size=500):
+    chunks = []
+    for i in range(0, len(text), chunk_size):
+        chunks.append(text[i:i+chunk_size])
+    return chunks
+
+# ---------------- FILE UPLOAD ----------------
 uploaded_file = st.file_uploader("📄 Upload Ranking PDF", type=["pdf"])
 
 if uploaded_file:
@@ -44,63 +41,80 @@ if uploaded_file:
     # Extract text
     text = extract_text_from_pdf(uploaded_file)
 
-    # Split into chunks
+    if not text.strip():
+        st.error("❌ Could not extract text (PDF may be scanned)")
+        st.stop()
+
+    # Split text
     chunks = split_text(text)
 
-    # Convert to embeddings
+    # Embeddings
     embeddings = model.encode(chunks)
 
-    # Create FAISS index
+    # FAISS index
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(np.array(embeddings))
 
-    st.success("✅ PDF processed!")
+    st.success("✅ PDF processed successfully!")
 
-    # HuggingFace client
+    # HuggingFace Client
     client = InferenceClient(
-        model="mistralai/Mistral-7B-Instruct-v0.2",
         token=st.secrets["HF_TOKEN"]
     )
 
-    # User query
-    query = st.text_input("💬 Ask your question")
+    # ---------------- CHAT INPUT ----------------
+    query = st.text_input(
+        "💬 Ask your question",
+        placeholder="Extract CODE, COLLEGE NAME, COURSE CODE, COURSE NAME, CET NO, LOCATION"
+    )
 
     if query:
         # Embed query
         query_vec = model.encode([query])
 
-        # Search similar chunks
+        # Search top chunks
         D, I = index.search(np.array(query_vec), k=5)
-
         context = "\n".join([chunks[i] for i in I[0]])
 
         # Prompt
         prompt = f"""
 You are an expert data extractor.
 
-From the given context, extract:
-CODE, COLLEGE NAME, COURSE CODE, COURSE NAME, CET NO, LOCATION
+Extract the following fields:
+- CODE
+- COLLEGE NAME
+- COURSE CODE
+- COURSE NAME
+- CET NO
+- LOCATION
 
-Return in clean structured format.
+Return output in clean structured format (table or CSV).
 
 Context:
 {context}
 
-Question:
+User Question:
 {query}
 """
 
+        # ---------------- CHAT MODEL ----------------
         with st.spinner("🤖 Generating answer..."):
-            response = client.text_generation(
-                prompt,
-                max_new_tokens=500,
+            response = client.chat.completions.create(
+                model="HuggingFaceH4/zephyr-7b-beta",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,
                 temperature=0
             )
 
-        st.subheader("📌 Answer")
-        st.write(response)
+            answer = response.choices[0].message.content
 
-# Reset button
+        # ---------------- OUTPUT ----------------
+        st.subheader("📌 Answer")
+        st.write(answer)
+
+# ---------------- RESET ----------------
 if st.button("🔄 Reset"):
-    st.experimental_rerun()
+    st.rerun()
