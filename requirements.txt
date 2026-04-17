@@ -1,8 +1,6 @@
 streamlit
-langchain
-langchain-community
-langchain-text-splitters
-faiss-cpu
 pypdf
 sentence-transformers
+faiss-cpu
 huggingface_hub
+numpy
